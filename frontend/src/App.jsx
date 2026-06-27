@@ -10,6 +10,8 @@ import SolarSummary from './components/SolarSummary'
 
 import Toast from './components/Toast'
 
+import Background3D from './components/Background3D'
+
 import { extractBillData, generateExcel, getDownloadUrl, getErrorMessage } from './services/api'
 
 
@@ -363,9 +365,11 @@ export default function App() {
 
   return (
 
-    <div className="min-h-screen flex flex-col">
+    <div className="min-h-screen flex flex-col relative">
 
-      <header className="app-header">
+      <Background3D />
+
+      <header className="app-header relative z-10">
 
         <div className="max-w-3xl mx-auto px-4 py-4 flex items-center gap-3">
 
@@ -393,7 +397,7 @@ export default function App() {
 
 
 
-      <main className="flex-1 max-w-3xl w-full mx-auto px-4 py-8">
+      <main className="flex-1 max-w-3xl w-full mx-auto px-4 py-8 relative z-10">
 
         {step === STEPS.UPLOAD && (
 
@@ -537,7 +541,7 @@ export default function App() {
 
 
 
-      <footer className="py-4 text-center text-xs text-slate-400">
+      <footer className="py-4 text-center text-xs text-slate-400 relative z-10">
 
         MSEDCL electricity bills · Maharashtra
 
