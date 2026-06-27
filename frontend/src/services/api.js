@@ -1,6 +1,8 @@
 import axios from 'axios'
 
 const api = axios.create({
+  // Production: leave empty to use Vercel /api proxy → Railway backend
+  // Local dev: empty uses Vite proxy in vite.config.js
   baseURL: import.meta.env.VITE_API_URL || '',
   timeout: 120000, // 2 min — Vision API can be slow
   headers: {
