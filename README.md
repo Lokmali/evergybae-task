@@ -239,4 +239,5 @@ MIT — use freely for commercial and personal projects.
 
 ---
 
-Built with ❤️ by Energybae AI
+Built with ❤️ by LOK
+
