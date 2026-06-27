@@ -1,0 +1,7 @@
+frontend/
+.git/
+**/__pycache__
+**/.env
+backend/uploads/*
+backend/outputs/*
+*.md
