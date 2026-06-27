@@ -1,9 +1,9 @@
-# Railway deployment config — set Service Root Directory to "backend" in Railway dashboard
+# Railway — uses Dockerfile in backend/ (set Root Directory = backend)
 [build]
-builder = "nixpacks"
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
 
 [deploy]
-startCommand = "uvicorn app:app --host 0.0.0.0 --port $PORT"
 healthcheckPath = "/api/health"
 healthcheckTimeout = 300
 restartPolicyType = "on_failure"
