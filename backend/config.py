@@ -70,5 +70,10 @@ CORS_ORIGINS = os.getenv(
     "http://localhost:5173,http://127.0.0.1:5173",
 ).split(",")
 
+# Extraction performance (balanced = faster, thorough = more scans, slower)
+EXTRACTION_MODE = os.getenv("EXTRACTION_MODE", "balanced").strip().lower()
+MAX_PDF_PAGES = int(os.getenv("MAX_PDF_PAGES", "3"))
+GAP_FILL_ENABLED = os.getenv("GAP_FILL_ENABLED", "true").strip().lower() in ("1", "true", "yes")
+
 # Excel template
 EXCEL_TEMPLATE_PATH = TEMPLATES_DIR / "Solar_Template.xlsx"

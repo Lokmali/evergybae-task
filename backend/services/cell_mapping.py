@@ -203,8 +203,8 @@ AUTOMATION_FIELDS: list[FieldSpec] = [
         "data_type": "Number",
         "required": "No",
         "description": "Previous meter reading (kWh)",
-        "number_format": '#,##0" kWh"',
-        "comment": "Previous Reading\nExpected: Numeric\nExample: 12500",
+        "number_format": "0",
+        "comment": "Previous Reading\nExpected: Numeric meter index (no kWh suffix)\nExample: 18292",
     },
     {
         "field_name": "units_consumed",
@@ -220,9 +220,9 @@ AUTOMATION_FIELDS: list[FieldSpec] = [
         "cell": "D13",
         "data_type": "Number",
         "required": "No",
-        "description": "Current meter reading (kWh)",
-        "number_format": '#,##0" kWh"',
-        "comment": "Current Reading\nExpected: Numeric\nExample: 12950",
+        "description": "Current meter reading (numeric index, not consumption)",
+        "number_format": "0",
+        "comment": "Current Reading\nExpected: Numeric meter index (no kWh suffix)\nExample: 18429",
     },
     {
         "field_name": "bill_amount",

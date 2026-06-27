@@ -62,9 +62,21 @@ export function getErrorMessage(error) {
       return 'Network error. Please check your connection and ensure the backend is running.'
     }
     const detail = error.response.data?.detail
-    if (typeof detail === 'string') return detail
+    if (typeof detail === 'string') {
+      if (detail.includes('Unable to read PDF')) return detail
+      if (detail.includes('Consumer Number')) return detail
+      if (detail.includes('Bill Amount')) return detail
+      if (detail.includes('Image quality')) return detail
+      return detail
+    }
     if (Array.isArray(detail)) {
       return detail.map((d) => d.msg || JSON.stringify(d)).join(', ')
+    }
+    if (error.response.status === 413) {
+      return 'File is too large. Please upload a smaller PDF or image.'
+    }
+    if (error.response.status === 422) {
+      return 'Could not extract bill data. Try a clearer photo or PDF.'
     }
     return `Server error (${error.response.status}). Please try again.`
   }

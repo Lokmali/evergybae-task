@@ -12,13 +12,14 @@ from pydantic import BaseModel, Field
 from config import (
     ALLOWED_EXTENSIONS,
     ALLOWED_MIME_TYPES,
+    MAX_PDF_PAGES,
     MAX_UPLOAD_SIZE_BYTES,
     OUTPUTS_DIR,
     UPLOADS_DIR,
     is_openai_key_configured,
 )
-from services.bill_validator import CANONICAL_FIELDS
-from services.ai_extractor import extract_bill_data, validate_extracted_data
+from services.extractor import extract_bill_data, validate_extracted_data
+from services.bill_validator import CANONICAL_FIELDS, strip_internal_metadata
 from services.cell_mapping import EXTRACTABLE_FIELDS
 from services.excel_writer import fill_excel_template
 from services.pdf_converter import is_pdf, pdf_to_images
@@ -34,6 +35,8 @@ class ExtractResponse(BaseModel):
     session_id: str
     extracted_data: dict
     fields: list[str]
+    field_confidence: dict[str, int] = Field(default_factory=dict)
+    solar_summary: dict = Field(default_factory=dict)
 
 
 class GenerateRequest(BaseModel):
@@ -101,10 +104,41 @@ async def _save_upload(file: UploadFile, session_id: str) -> Path:
 
 
 def _resolve_image_paths(upload_path: Path) -> list[Path]:
-    """Return image path(s) — convert all PDF pages (up to 3) for full bill capture."""
+    """Return image path(s) — convert all PDF pages for full bill capture."""
     if is_pdf(upload_path):
-        return pdf_to_images(upload_path, max_pages=3)
+        try:
+            return pdf_to_images(upload_path, max_pages=MAX_PDF_PAGES)
+        except Exception as exc:
+            logger.warning("PDF conversion failed: %s", exc)
+            raise HTTPException(
+                status_code=422,
+                detail="Unable to read PDF. Please upload a clearer file or try a JPG/PNG image.",
+            ) from exc
     return [upload_path]
+
+
+def _friendly_extraction_error(exc: Exception) -> str:
+    """Map internal errors to user-facing messages."""
+    msg = str(exc).lower()
+
+    if "openai api key" in msg or "api key" in msg:
+        return str(exc)
+    if "pdf" in msg or "pymupdf" in msg or "fitz" in msg:
+        return "Unable to read PDF. Please upload a clearer file or try a JPG/PNG image."
+    if "image" in msg and ("quality" in msg or "empty" in msg or "invalid" in msg):
+        return "Image quality is too low. Please upload a sharper, well-lit photo of the bill."
+    if "empty response" in msg or "parse" in msg and "json" in msg:
+        return "Could not read bill data. Please try again with a clearer upload."
+    if "no valid image" in msg:
+        return "Unable to process the uploaded file. Please try a PDF or image (PNG/JPG)."
+    if "consumer" in msg and "not" in msg:
+        return "Consumer Number not detected. Check the image and try again."
+    if "bill amount" in msg or "amount missing" in msg:
+        return "Bill Amount missing. Ensure the payment section of the bill is visible."
+
+    return str(exc) if isinstance(exc, ValueError) else (
+        "An unexpected error occurred during extraction. Please try again."
+    )
 
 
 @router.get("/health")
@@ -139,24 +173,37 @@ async def extract_from_bill(file: UploadFile = File(...)):
         upload_path = await _save_upload(file, session_id)
         image_paths = _resolve_image_paths(upload_path)
         raw_data = extract_bill_data(image_paths)
-        extracted_data = validate_extracted_data(raw_data)
+        field_confidence = raw_data.pop("_field_confidence", {})
+        solar_summary = raw_data.pop("_solar_summary", {})
+        extracted_data = strip_internal_metadata(raw_data)
 
         # Persist extracted data for the generate step
         data_file = UPLOADS_DIR / f"{session_id}_data.json"
         with open(data_file, "w", encoding="utf-8") as f:
-            json.dump(extracted_data, f, ensure_ascii=False, indent=2)
+            json.dump(
+                {
+                    "extracted_data": extracted_data,
+                    "field_confidence": field_confidence,
+                    "solar_summary": solar_summary,
+                },
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
 
         return ExtractResponse(
             session_id=session_id,
             extracted_data=extracted_data,
             fields=EXTRACTABLE_FIELDS,
+            field_confidence=field_confidence,
+            solar_summary=solar_summary,
         )
 
     except HTTPException:
         raise
     except ValueError as exc:
         logger.warning("Extraction validation error: %s", exc)
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise HTTPException(status_code=422, detail=_friendly_extraction_error(exc)) from exc
     except FileNotFoundError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     except Exception as exc:
@@ -180,7 +227,8 @@ async def generate_excel(request: GenerateRequest):
 
     try:
         sanitized = validate_extracted_data(request.data)
-        filename, output_path = fill_excel_template(sanitized)
+        excel_data = strip_internal_metadata(sanitized)
+        filename, output_path = fill_excel_template(excel_data)
 
         return GenerateResponse(
             filename=filename,

@@ -8,7 +8,7 @@ from typing import Any
 from openpyxl import load_workbook
 
 from config import EXCEL_TEMPLATE_PATH, OUTPUTS_DIR
-from services.bill_validator import parse_numeric
+from services.bill_validator import NOT_AVAILABLE, parse_numeric
 from services.cell_mapping import (
     AUTOMATION_FIELDS,
     CALCULATOR_SHEET_NAME,
@@ -33,10 +33,18 @@ def _coerce_cell_value(value: Any, data_type: str) -> str | int | float | None:
     if value is None:
         return None
 
+    if value == NOT_AVAILABLE:
+        return NOT_AVAILABLE
+
     if data_type in ("Number", "Currency"):
         if isinstance(value, (int, float)):
             return value
-        return parse_numeric(value)
+        parsed = parse_numeric(value)
+        if parsed is not None:
+            return parsed
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return None
 
     if data_type == "Date":
         return None if value is None else str(value).strip()
@@ -88,6 +96,8 @@ def fill_excel_template(data: dict[str, Any]) -> tuple[str, Path]:
     filled_count = 0
 
     for field_name, cell_ref in combined_mapping.items():
+        if field_name.startswith("_"):
+            continue
         if field_name not in data:
             continue
         if field_name not in _EXCEL_FIELD_NAMES:

@@ -1,88 +1,175 @@
-/**
- * Editable preview of AI-extracted bill fields before Excel generation.
- */
-export default function DataPreview({ data, fields, onChange, onGenerate, onReset, isGenerating }) {
-  const formatLabel = (key) =>
-    key
-      .replace(/_/g, ' ')
-      .replace(/\b\w/g, (c) => c.toUpperCase())
+function formatLabel(key) {
+  return key.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())
+}
 
+function ConfidenceBadge({ score }) {
+  if (score == null || score === 0) {
+    return (
+      <span className="inline-flex items-center gap-1 text-xs text-amber-600 font-medium">
+        <span aria-hidden>⚠</span> Not Found
+      </span>
+    )
+  }
+  if (score >= 90) {
+    return (
+      <span className="inline-flex items-center gap-1 text-xs text-green-600 font-medium">
+        <span aria-hidden>✅</span> {score}%
+      </span>
+    )
+  }
+  if (score >= 70) {
+    return (
+      <span className="inline-flex items-center gap-1 text-xs text-amber-600 font-medium">
+        <span aria-hidden>⚠</span> {score}%
+      </span>
+    )
+  }
+  return (
+    <span className="inline-flex items-center gap-1 text-xs text-red-500 font-medium">
+      <span aria-hidden>⚠</span> {score}%
+    </span>
+  )
+}
+
+function formatDisplayValue(value) {
+  if (value == null || value === '') return ''
+  if (Array.isArray(value) || typeof value === 'object') return JSON.stringify(value, null, 2)
+  return String(value)
+}
+
+function hasExtractedValue(value) {
+  if (value == null || value === '') return false
+  if (value === 'Not Available') return true
+  if (Array.isArray(value)) return value.length > 0
+  if (typeof value === 'object') return Object.keys(value).length > 0
+  return true
+}
+
+export default function DataPreview({
+  data,
+  fields,
+  fieldConfidence = {},
+  solarSummary = {},
+  onChange,
+  onGenerate,
+  onReset,
+}) {
   const handleChange = (key, value) => {
     onChange({ ...data, [key]: value === '' ? null : value })
   }
 
-  // Show known fields first, then any extra fields from AI
-  const knownSet = new Set(fields)
-  const extraKeys = Object.keys(data).filter((k) => !knownSet.has(k))
-  const displayFields = [...fields, ...extraKeys]
+  const previewFields = fields.filter((key) => key !== 'monthly_history')
+  const filledCount = previewFields.filter((key) => hasExtractedValue(data[key])).length
 
-  const filledCount = Object.values(data).filter((v) => v != null && v !== '').length
+  const renderField = (key) => {
+    const isComplex = Array.isArray(data[key]) || (typeof data[key] === 'object' && data[key] !== null)
+    const score = fieldConfidence[key]
+
+    return (
+      <div key={key}>
+        <div className="flex items-center justify-between gap-2 mb-1">
+          <label htmlFor={key} className="text-xs font-medium text-slate-500">
+            {formatLabel(key)}
+          </label>
+          <ConfidenceBadge score={score} />
+        </div>
+        {isComplex ? (
+          <textarea
+            id={key}
+            rows={3}
+            className="input-field font-mono text-xs resize-y"
+            value={formatDisplayValue(data[key])}
+            readOnly
+          />
+        ) : (
+          <input
+            id={key}
+            type="text"
+            className="input-field-filled"
+            value={formatDisplayValue(data[key])}
+            onChange={(e) => handleChange(key, e.target.value)}
+          />
+        )}
+      </div>
+    )
+  }
 
   return (
     <div className="card overflow-hidden">
-      <div className="px-6 py-5 border-b border-slate-100 bg-gradient-to-r from-primary-50 to-emerald-50">
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-          <div>
-            <h2 className="text-xl font-bold text-slate-800">Extracted Bill Data</h2>
-            <p className="text-sm text-slate-500 mt-0.5">
-              Review and edit values before generating your Excel file
-              <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded-full bg-accent-100 text-accent-700 text-xs font-medium">
-                {filledCount} fields extracted
-              </span>
-            </p>
-          </div>
-          <button type="button" onClick={onReset} className="btn-secondary text-sm py-2 px-4">
-            Upload New Bill
-          </button>
+      <div className="px-5 py-4 border-b border-blue-100 flex items-center justify-between gap-4">
+        <div>
+          <h2 className="font-semibold text-blue-800">Review extracted data</h2>
+          <p className="text-xs text-slate-500 mt-0.5">
+            {filledCount} of {previewFields.length} fields · edit any value before generating Excel
+          </p>
         </div>
-      </div>
-
-      <div className="p-6 max-h-[420px] overflow-y-auto">
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {displayFields.map((key) => (
-            <div key={key}>
-              <label htmlFor={key} className="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">
-                {formatLabel(key)}
-              </label>
-              <input
-                id={key}
-                type="text"
-                className="input-field"
-                value={data[key] ?? ''}
-                placeholder="Not found on bill"
-                onChange={(e) => handleChange(key, e.target.value)}
-              />
-            </div>
-          ))}
-        </div>
-      </div>
-
-      <div className="px-6 py-5 border-t border-slate-100 bg-slate-50/50 flex flex-col sm:flex-row gap-3 sm:justify-end">
-        <button
-          type="button"
-          onClick={onGenerate}
-          disabled={isGenerating}
-          className="btn-primary"
-        >
-          {isGenerating ? (
-            <>
-              <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-              Generating Excel...
-            </>
-          ) : (
-            <>
-              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
-                />
-              </svg>
-              Generate Excel
-            </>
-          )}
+        <button type="button" onClick={onReset} className="btn-ghost shrink-0">
+          New bill
         </button>
+      </div>
+
+      <div className="p-5 max-h-[520px] overflow-y-auto">
+        <SolarSummaryInline summary={solarSummary} />
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          {previewFields.map(renderField)}
+        </div>
+
+        {hasExtractedValue(data.monthly_history) && (
+          <div className="mt-6">
+            <h3 className="section-title">Monthly consumption</h3>
+            {renderField('monthly_history')}
+          </div>
+        )}
+      </div>
+
+      <div className="px-5 py-4 border-t border-blue-100 bg-blue-50/40 flex justify-end">
+        <button type="button" onClick={onGenerate} className="btn-primary">
+          Generate Excel
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function SolarSummaryInline({ summary }) {
+  if (!summary || Object.keys(summary).length === 0) return null
+
+  const {
+    monthly_consumption_kwh,
+    recommended_solar_capacity_kw,
+    estimated_annual_savings_inr,
+    estimated_payback_years,
+  } = summary
+
+  const formatInr = (v) => (v == null ? '—' : `₹${Number(v).toLocaleString('en-IN')}`)
+
+  return (
+    <div className="mb-6 rounded-lg border border-green-200 bg-gradient-to-br from-green-50 to-blue-50 p-4">
+      <h3 className="text-sm font-bold text-green-800 mb-3">Solar Assessment Summary</h3>
+      <div className="grid grid-cols-2 gap-3 text-sm">
+        <p>
+          <span className="text-slate-500 text-xs block">Monthly Consumption</span>
+          <span className="font-semibold">
+            {monthly_consumption_kwh != null ? `${monthly_consumption_kwh} kWh` : '—'}
+          </span>
+        </p>
+        <p>
+          <span className="text-slate-500 text-xs block">Recommended Solar Capacity</span>
+          <span className="font-semibold">
+            {recommended_solar_capacity_kw != null ? `${recommended_solar_capacity_kw} kW` : '—'}
+          </span>
+        </p>
+        <p>
+          <span className="text-slate-500 text-xs block">Estimated Annual Savings</span>
+          <span className="font-semibold text-green-700">{formatInr(estimated_annual_savings_inr)}</span>
+        </p>
+        <p>
+          <span className="text-slate-500 text-xs block">Estimated Payback Period</span>
+          <span className="font-semibold">
+            {estimated_payback_years != null ? `${estimated_payback_years} Years` : '—'}
+          </span>
+        </p>
       </div>
     </div>
   )

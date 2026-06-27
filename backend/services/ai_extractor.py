@@ -1,7 +1,7 @@
 """
 Extract structured bill data from MSEDCL electricity bills using OpenAI Vision.
 
-Supports multi-page PDFs (consumption history on page 2+) and post-AI validation.
+Pipeline: multi-variant preprocess → Vision API → gap-fill pass → validate.
 """
 
 from __future__ import annotations
@@ -14,89 +14,23 @@ from typing import Any
 
 from openai import OpenAI, OpenAIError
 
-from config import get_openai_api_key, get_openai_model, is_openai_key_configured
+from config import GAP_FILL_ENABLED, get_openai_api_key, get_openai_model, is_openai_key_configured
 from services.bill_validator import sanitize_for_api, validate_and_normalize
+from services.extraction_prompt import (
+    GAP_FILL_PROMPT,
+    PRIORITY_GAP_FIELDS,
+    SYSTEM_PROMPT,
+    USER_PROMPT,
+)
+from services.extraction_schema import MSEDCL_BILL_JSON_SCHEMA
+from services.image_preprocessor import preprocess_for_extraction
+from services.llm_parser import normalize_text_fields
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """You are an expert document intelligence system specialized in Maharashtra MSEDCL (Maharashtra State Electricity Distribution Company Limited) electricity bills.
-
-You read BOTH Marathi and English text fluently.
-
-CRITICAL RULES:
-1. Search the ENTIRE document — every page, every section, every table.
-2. Do NOT stop after finding the first occurrence — cross-check labels with values.
-3. Match each value to the EXACT field label printed on the bill.
-4. NEVER invent or guess data. If a field is not visible, return null.
-5. NEVER confuse these distinct fields:
-   - consumer_number: 10–15 digit account/consumer ID (NOT meter serial)
-   - meter_number: Consumer meter number printed near meter details
-   - meter_serial_number: Physical meter serial / make number (separate from consumer number)
-   - tariff_code: Short code like A50, B21 (NOT load, NOT full tariff description)
-   - tariff_category: Full tariff description like "90/LT I Res 1-Phase" (NOT kW load)
-   - contract_load / sanctioned_load / connected_load: Numeric kW ONLY (e.g. 3.30) — NEVER extract from tariff text
-   - previous_reading / current_reading: Meter kWh readings (large integers, e.g. 33674, 33699)
-   - billing_cycle: Cycle path like "2020/TUMSAR SDN/BHANDARA DIVISION"
-   - division: e.g. "BHANDARA DIVISION"
-   - sub_division: e.g. "TUMSAR SDN"
-
-LOAD EXTRACTION (VERY IMPORTANT):
-- Look for labels: "Contract Load", "Sanctioned Load", "Connected Load", "Load (KW)", "Load (kW)"
-- Extract ONLY the numeric kW value next to that label (e.g. 3.30)
-- "90" in "90/LT I Res" is NOT load — it is part of tariff category
-- "0.90 KW" from tariff code is WRONG — real load is typically 1.0–50 kW for domestic bills
-
-CHARGES:
-Extract numeric amounts ONLY (no ₹ symbol) for:
-fixed_charges, energy_charges, fuel_adjustment, electricity_duty, tax_on_sale, bill_amount
-
-CONSUMPTION:
-- units_consumed: numeric kWh only (e.g. 25, not "25 kWh")
-- bill_amount: numeric INR only (e.g. 1460, not "₹1460.00")
-
-12-MONTH HISTORY:
-If a consumption graph/table shows last 12 months, extract ALL months into monthly_history array.
-Each entry: {"month": "February 2025", "units": 99, "amount": null}
-Include amount only if visible for that month.
-
-OUTPUT:
-Return STRICT JSON only. No markdown. No explanation. No text outside JSON."""
-
-USER_PROMPT = """Extract ALL fields from this Maharashtra MSEDCL electricity bill.
-Read every page provided. Return this exact JSON structure with null for missing fields:
-
-{
-  "consumer_name": null,
-  "consumer_number": null,
-  "billing_month": null,
-  "billing_period": null,
-  "bill_date": null,
-  "due_date": null,
-  "address": null,
-  "tariff_category": null,
-  "meter_number": null,
-  "meter_serial_number": null,
-  "division": null,
-  "sub_division": null,
-  "tariff_code": null,
-  "contract_load": null,
-  "connected_load": null,
-  "sanctioned_load": null,
-  "voltage": null,
-  "power_factor": null,
-  "billing_cycle": null,
-  "gst_number": null,
-  "previous_reading": null,
-  "current_reading": null,
-  "units_consumed": null,
-  "bill_amount": null,
-  "fixed_charges": null,
-  "energy_charges": null,
-  "fuel_adjustment": null,
-  "electricity_duty": null,
-  "tax_on_sale": null,
-  "monthly_history": []
-}"""
+VISION_DETAIL = "high"
+MAX_OUTPUT_TOKENS = 16384
+GAP_FILL_THRESHOLD = 8  # Only re-scan when many fields still missing
 
 
 def _encode_image_base64(image_path: Path) -> str:
@@ -104,49 +38,134 @@ def _encode_image_base64(image_path: Path) -> str:
         return base64.b64encode(f.read()).decode("utf-8")
 
 
-def _media_type_for_path(image_path: Path) -> str:
-    ext = image_path.suffix.lower()
-    if ext in (".jpg", ".jpeg"):
-        return "image/jpeg"
-    return "image/png"
+def _is_empty(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str) and not value.strip():
+        return True
+    if isinstance(value, list) and len(value) == 0:
+        return True
+    return False
 
 
-def _build_vision_content(image_paths: list[Path]) -> list[dict[str, Any]]:
-    """Build OpenAI message content with text + all bill page images."""
-    content: list[dict[str, Any]] = [
-        {"type": "text", "text": USER_PROMPT},
-    ]
-    for i, path in enumerate(image_paths, start=1):
-        if len(image_paths) > 1:
-            content.append(
-                {
-                    "type": "text",
-                    "text": f"--- Bill page {i} of {len(image_paths)} ---",
-                }
-            )
-        media_type = _media_type_for_path(path)
+def _count_missing_priority(raw: dict[str, Any]) -> list[str]:
+    missing = []
+    for field in PRIORITY_GAP_FIELDS:
+        val = raw.get(field)
+        if field == "monthly_history":
+            if not val or (isinstance(val, list) and len(val) == 0):
+                missing.append(field)
+        elif _is_empty(val):
+            missing.append(field)
+    return missing
+
+
+def _merge_monthly_history(a: Any, b: Any) -> list[dict[str, Any]]:
+    """Merge monthly history arrays, dedupe by month name, prefer entries with more data."""
+    combined: dict[str, dict[str, Any]] = {}
+
+    for source in (a, b):
+        if not isinstance(source, list):
+            continue
+        for entry in source:
+            if not isinstance(entry, dict):
+                continue
+            month = entry.get("month")
+            if not month:
+                continue
+            key = str(month).strip().lower()
+            existing = combined.get(key)
+            if existing is None or len(entry) > len(existing):
+                combined[key] = entry
+
+    return list(combined.values())
+
+
+def merge_extraction_results(primary: dict[str, Any], secondary: dict[str, Any]) -> dict[str, Any]:
+    """Fill null fields in primary from secondary; merge monthly history."""
+    merged = dict(primary)
+
+    for key, val in secondary.items():
+        if key == "monthly_history":
+            merged[key] = _merge_monthly_history(merged.get(key), val)
+        elif _is_empty(merged.get(key)) and not _is_empty(val):
+            merged[key] = val
+
+    return merged
+
+
+def _build_vision_content(
+    image_variants: list[tuple[Path, str]],
+    user_text: str = USER_PROMPT,
+) -> list[dict[str, Any]]:
+    """Build message content with instructions + labelled image variants."""
+    content: list[dict[str, Any]] = [{"type": "text", "text": user_text}]
+
+    for path, caption in image_variants:
+        content.append({"type": "text", "text": f"--- {caption} ---"})
         b64 = _encode_image_base64(path)
         content.append(
             {
                 "type": "image_url",
                 "image_url": {
-                    "url": f"data:{media_type};base64,{b64}",
-                    "detail": "high",
+                    "url": f"data:image/png;base64,{b64}",
+                    "detail": VISION_DETAIL,
                 },
             }
         )
     return content
 
 
+def _call_vision_api(
+    client: OpenAI,
+    model: str,
+    image_variants: list[tuple[Path, str]],
+    user_text: str = USER_PROMPT,
+) -> dict[str, Any]:
+    """Invoke OpenAI with JSON schema structured output."""
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": _build_vision_content(image_variants, user_text)},
+    ]
+
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            max_tokens=MAX_OUTPUT_TOKENS,
+            temperature=0,
+            response_format={
+                "type": "json_schema",
+                "json_schema": MSEDCL_BILL_JSON_SCHEMA,
+            },
+        )
+    except OpenAIError as exc:
+        err_text = str(exc).lower()
+        if "json_schema" in err_text or "response_format" in err_text:
+            logger.warning("json_schema unsupported, falling back to json_object: %s", exc)
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                max_tokens=MAX_OUTPUT_TOKENS,
+                temperature=0,
+                response_format={"type": "json_object"},
+            )
+        else:
+            logger.exception("OpenAI API error")
+            raise ValueError(f"OpenAI API error: {exc}") from exc
+
+    raw_content = response.choices[0].message.content
+    if not raw_content:
+        raise ValueError("OpenAI returned an empty response.")
+
+    return _parse_json_response(raw_content.strip())
+
+
 def extract_bill_data(image_paths: Path | list[Path]) -> dict[str, Any]:
     """
-    Send bill image(s) to OpenAI Vision and return validated JSON fields.
+    Send preprocessed bill image(s) to OpenAI Vision and return validated fields.
 
-    Args:
-        image_paths: Single image or list of images (multi-page PDF).
-
-    Returns:
-        Validated dictionary of extracted field names to values.
+    Uses multi-variant scanning + optional gap-fill pass for completeness.
     """
     if not is_openai_key_configured():
         raise ValueError(
@@ -161,48 +180,46 @@ def extract_bill_data(image_paths: Path | list[Path]) -> dict[str, Any]:
     if not paths:
         raise ValueError("No valid image files provided for extraction.")
 
+    logger.info("Preparing multi-variant scans for %d source page(s)", len(paths))
+    variants = preprocess_for_extraction(paths)
+
     api_key = get_openai_api_key()
     model = get_openai_model()
-
-    logger.info(
-        "Extracting bill data via OpenAI Vision (%s) — %d image(s)",
-        model,
-        len(paths),
-    )
-
     client = OpenAI(api_key=api_key)
 
-    try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": _build_vision_content(paths)},
-            ],
-            max_tokens=8192,
-            temperature=0,
-            response_format={"type": "json_object"},
+    logger.info(
+        "Extraction pass 1 — OpenAI Vision (%s), %d image variant(s)",
+        model,
+        len(variants),
+    )
+    raw_data = _call_vision_api(client, model, variants)
+
+    missing = _count_missing_priority(raw_data)
+    if GAP_FILL_ENABLED and len(missing) >= GAP_FILL_THRESHOLD:
+        # Gap-fill uses full-page scans only (skip magnified crops) for speed
+        full_page_variants = [
+            (p, c) for p, c in variants if "magnified" not in c.lower()
+        ] or variants
+        logger.info(
+            "Extraction pass 2 — gap-fill for %d missing fields (using %d images)",
+            len(missing),
+            len(full_page_variants),
         )
-    except OpenAIError as exc:
-        logger.exception("OpenAI API error")
-        raise ValueError(f"OpenAI API error: {exc}") from exc
+        gap_prompt = GAP_FILL_PROMPT.format(missing_fields=", ".join(missing))
+        secondary = _call_vision_api(client, model, full_page_variants, user_text=gap_prompt)
+        raw_data = merge_extraction_results(raw_data, secondary)
 
-    raw_content = response.choices[0].message.content
-    if not raw_content:
-        raise ValueError("OpenAI returned an empty response.")
-
-    raw_data = _parse_json_response(raw_content.strip())
+    raw_data = normalize_text_fields(raw_data)
     validated = validate_and_normalize(raw_data)
+    filled = sum(1 for k, v in validated.items() if v is not None and not k.startswith("_"))
+    logger.info("Extraction complete — %d fields populated", filled)
     return sanitize_for_api(validated)
 
 
 def _parse_json_response(raw: str) -> dict[str, Any]:
-    """Parse JSON from model output, stripping markdown fences if present."""
     text = raw.strip()
-
     if text.startswith("```"):
-        lines = text.split("\n")
-        lines = [ln for ln in lines if not ln.strip().startswith("```")]
+        lines = [ln for ln in text.split("\n") if not ln.strip().startswith("```")]
         text = "\n".join(lines).strip()
 
     try:
@@ -220,10 +237,6 @@ def _parse_json_response(raw: str) -> dict[str, Any]:
 
 
 def validate_extracted_data(data: dict[str, Any]) -> dict[str, Any]:
-    """
-    Re-validate user-edited data before Excel generation.
-
-    Accepts raw or partially validated dict from the preview UI.
-    """
+    """Re-validate user-edited data before Excel generation."""
     validated = validate_and_normalize(data)
     return sanitize_for_api(validated)

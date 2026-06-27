@@ -8,11 +8,11 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-# Render at 2x zoom (~144 DPI) for readable bill text
-PDF_RENDER_MATRIX = fitz.Matrix(2.0, 2.0)
+# Render at 3x zoom (~216 DPI) for small text on PDF bills
+PDF_RENDER_MATRIX = fitz.Matrix(3.0, 3.0)
 
-# MSEDCL bills often have 12-month graph on page 2
-DEFAULT_MAX_PDF_PAGES = 3
+# Capture all pages including consumption graph annexures
+DEFAULT_MAX_PDF_PAGES = 5
 
 
 def pdf_to_images(
